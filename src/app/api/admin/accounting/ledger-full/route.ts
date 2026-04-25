@@ -1,0 +1,105 @@
+import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import connectToDatabase from "@/lib/mongodb";
+import ProfessionalLedgerEntry from "@/models/ProfessionalLedgerEntry";
+
+function csvEscape(s: string | number | undefined | null): string {
+  if (s === undefined || s === null) return "";
+  const t = String(s);
+  if (/[",\n\r]/.test(t)) return `"${t.replace(/"/g, '""')}"`;
+  return t;
+}
+
+/** Grand livre complet : crédits et débits (archive / impôts). */
+export async function GET(req: NextRequest) {
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user?.id || session.user.role !== "admin") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    await connectToDatabase();
+
+    const { searchParams } = new URL(req.url);
+    const yearStr = searchParams.get("year");
+    const year = yearStr ? parseInt(yearStr, 10) : new Date().getFullYear();
+    if (Number.isNaN(year) || year < 2000 || year > 2100) {
+      return NextResponse.json({ error: "Invalid year" }, { status: 400 });
+    }
+
+    const start = new Date(year, 0, 1);
+    const end = new Date(year + 1, 0, 1);
+
+    const rows = await ProfessionalLedgerEntry.find({
+      createdAt: { $gte: start, $lt: end },
+    })
+      .populate("professionalId", "firstName lastName email")
+      .populate("appointmentId", "date time")
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const header = [
+      "date",
+      "type_ligne",
+      "cycle_key",
+      "professional_id",
+      "professional_name",
+      "appointment_id",
+      "credit_net_pro_cad",
+      "debit_versement_cad",
+      "ref_versement",
+      "notes",
+      "canal",
+    ].join(",");
+
+    const lines = rows.map((r) => {
+      const pro = r.professionalId as unknown as {
+        firstName?: string;
+        lastName?: string;
+      } | null;
+      const proName = pro
+        ? `${pro.firstName ?? ""} ${pro.lastName ?? ""}`.trim()
+        : "";
+      const kind = r.entryKind === "debit" ? "debit" : "credit";
+      const creditAmt =
+        kind === "credit" ? r.netToProfessionalCad ?? 0 : "";
+      const debitAmt =
+        kind === "debit" ? r.payoutAmountCad ?? 0 : "";
+      return [
+        csvEscape(
+          r.createdAt
+            ? new Date(r.createdAt).toISOString().slice(0, 10)
+            : "",
+        ),
+        csvEscape(kind),
+        csvEscape(r.cycleKey),
+        csvEscape(String(r.professionalId)),
+        csvEscape(proName),
+        csvEscape(r.appointmentId ? String(r.appointmentId) : ""),
+        csvEscape(creditAmt),
+        csvEscape(debitAmt),
+        csvEscape(r.payoutReference),
+        csvEscape(r.payoutNotes),
+        csvEscape(r.paymentChannel),
+      ].join(",");
+    });
+
+    const csv = [header, ...lines].join("\n");
+    const bom = "\ufeff";
+
+    return new NextResponse(bom + csv, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="grand-livre-${year}.csv"`,
+      },
+    });
+  } catch (e: unknown) {
+    console.error("admin ledger-full:", e);
+    return NextResponse.json(
+      { error: "Failed to export ledger" },
+      { status: 500 },
+    );
+  }
+}
