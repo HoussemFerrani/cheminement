@@ -161,7 +161,9 @@ export const authAPI = {
     childDateOfBirth?: string;
     childServiceType?: string;
     medicalConditions?: string[];
+    otherMedicalCondition?: string;
     currentMedications?: string[];
+    otherMedication?: string;
     consultationMotifs?: string[];
     substanceUse?: string;
     previousTherapy?: boolean;
